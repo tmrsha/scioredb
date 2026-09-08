@@ -2,12 +2,6 @@ package scioredb
 
 import (
 	"encoding/binary"
-	"errors"
-)
-
-var (
-	ErrNegativeOffset   = errors.New("negative offset")
-	ErrIndexOutOfBounds = errors.New("index out of bounds")
 )
 
 type Page struct {
