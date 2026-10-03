@@ -8,7 +8,7 @@ type Page struct {
 	data []byte
 }
 
-func NewPage(size int) *Page {
+func NewPage(size int64) *Page {
 	return &Page{
 		data: make([]byte, size),
 	}
