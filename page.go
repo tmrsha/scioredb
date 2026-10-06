@@ -4,6 +4,11 @@ import (
 	"encoding/binary"
 )
 
+const (
+	int32Size = 4
+	int64Size = 8
+)
+
 type Page struct {
 	data []byte
 }
@@ -18,7 +23,7 @@ func (p *Page) PutInt32(off int64, i int32) error {
 	if off < 0 {
 		return ErrNegativeOffset
 	}
-	if off+4 > int64(len(p.data)) {
+	if off+int32Size > int64(len(p.data)) {
 		return ErrIndexOutOfBounds
 	}
 	binary.LittleEndian.PutUint32(p.data[off:], uint32(i))
@@ -29,22 +34,44 @@ func (p *Page) GetInt32(off int64) (int32, error) {
 	if off < 0 {
 		return 0, ErrNegativeOffset
 	}
-	if off+4 >= int64(len(p.data)) {
+	if off+int32Size > int64(len(p.data)) {
 		return 0, ErrIndexOutOfBounds
 	}
-	i := binary.LittleEndian.Uint32(p.data[off : off+4])
+	i := binary.LittleEndian.Uint32(p.data[off : off+int32Size])
 	return int32(i), nil
+}
+
+func (p *Page) PutInt64(off, i int64) error {
+	if off < 0 {
+		return ErrNegativeOffset
+	}
+	if off+int64Size > int64(len(p.data)) {
+		return ErrIndexOutOfBounds
+	}
+	binary.LittleEndian.PutUint64(p.data[off:], uint64(i))
+	return nil
+}
+
+func (p *Page) GetInt64(off int64) (int64, error) {
+	if off < 0 {
+		return 0, ErrNegativeOffset
+	}
+	if off+int64Size > int64(len(p.data)) {
+		return 0, ErrIndexOutOfBounds
+	}
+	i := binary.LittleEndian.Uint64(p.data[off : off+int64Size])
+	return int64(i), nil
 }
 
 func (p *Page) PutBytes(off int64, b []byte) error {
 	if off < 0 {
 		return ErrNegativeOffset
 	}
-	if off+int64(len(b))+4 > int64(len(p.data)) {
+	if off+int64(len(b))+int32Size > int64(len(p.data)) {
 		return ErrIndexOutOfBounds
 	}
 	binary.LittleEndian.PutUint32(p.data[off:], uint32(len(b)))
-	copy(p.data[off+4:], b)
+	copy(p.data[off+int32Size:], b)
 	return nil
 }
 
@@ -52,17 +79,17 @@ func (p *Page) GetBytes(off int64) ([]byte, error) {
 	if off < 0 {
 		return nil, ErrNegativeOffset
 	}
-	if off+4 >= int64(len(p.data)) {
+	if off+4 > int64(len(p.data)) {
 		return nil, ErrIndexOutOfBounds
 	}
-	l := binary.LittleEndian.Uint32(p.data[off : off+4])
+	l := binary.LittleEndian.Uint32(p.data[off : off+int32Size])
 	start := off + 4
 	end := start + int64(l)
 	if end > int64(len(p.data)) {
 		return nil, ErrIndexOutOfBounds
 	}
 	b := make([]byte, l)
-	copy(b, p.data[start:off+end])
+	copy(b, p.data[start:end])
 	return b, nil
 }
 
