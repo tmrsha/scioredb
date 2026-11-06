@@ -2,7 +2,6 @@ package scioredb
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 
 	"sync"
@@ -77,26 +76,9 @@ func TestFileManager(t *testing.T) {
 		}
 	})
 
-	t.Run("CloseAndGuard", func(t *testing.T) {
+	t.Run("Close", func(t *testing.T) {
 		if err := fm.Close(); err != nil {
 			t.Fatalf("failed to close file manager: %v", err)
-		}
-		blk := BlockID{Number: 0, Filename: testFile}
-		page := NewPage(blockSize)
-
-		err := fm.ReadBlock(blk, page)
-		if !errors.Is(err, ErrFileManagerClosed) {
-			t.Errorf("expected error %v, got %v", ErrFileManagerClosed, err)
-		}
-
-		_, err = fm.AppendBlock(testFile)
-		if !errors.Is(err, ErrFileManagerClosed) {
-			t.Errorf("expected error %v on append, got %v", ErrFileManagerClosed, err)
-		}
-
-		err = fm.Close()
-		if !errors.Is(err, ErrFileManagerClosed) {
-			t.Errorf("expected error %v on double close, got %v", ErrFileManagerClosed, err)
 		}
 	})
 }

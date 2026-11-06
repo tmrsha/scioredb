@@ -2,6 +2,7 @@ package scioredb
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
@@ -16,9 +17,9 @@ func TestBuffer(t *testing.T) {
 		dataFilename = "data.dbf"
 	)
 
-	memFS := MemFS()
+	fs := MemFS()
 
-	fm := NewFileManager(memFS, blockSize)
+	fm := NewFileManager(fs, blockSize)
 
 	lm, err := NewLogManager(fm, logFilename, blockSize)
 	if err != nil {
@@ -77,7 +78,18 @@ func TestBuffer(t *testing.T) {
 			t.Fatalf("failed to modify underlying page: %v", err)
 		}
 
-		lsn, err := lm.AppendRecord([]byte("tx 1 modifies blk 0"))
+		valBytes := make([]byte, 4)
+		binary.LittleEndian.PutUint32(valBytes, uint32(expectedVal))
+
+		rec := LogRecord{
+			Type:     TxSetBytes,
+			TxID:     1,
+			Block:    blk0,
+			Offset:   20,
+			RawValue: valBytes,
+		}
+
+		lsn, err := lm.AppendRecord(rec)
 		if err != nil {
 			t.Fatalf("lm.AppendRecord failed: %v", err)
 		}
@@ -88,7 +100,7 @@ func TestBuffer(t *testing.T) {
 			t.Fatalf("b.AssignToBlock(blk1) unexpected error: %v", err)
 		}
 
-		file, err := memFS.Open(dataFilename)
+		file, err := fs.Open(dataFilename)
 		if err != nil {
 			t.Fatalf("failed to open fake data file: %v", err)
 		}
@@ -98,7 +110,7 @@ func TestBuffer(t *testing.T) {
 			t.Fatalf("failed to read block 0 from fake disk: %v", err)
 		}
 
-		diskPage := &Page{data: diskPageBuf}
+		diskPage := NewPageFromBuffer(diskPageBuf)
 		actualVal, err := diskPage.GetInt32(20)
 		if err != nil {
 			t.Fatalf("failed to parse int32 from disk data: %v", err)

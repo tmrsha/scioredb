@@ -19,6 +19,12 @@ func NewPage(size int64) *Page {
 	}
 }
 
+func NewPageFromBuffer(buf []byte) *Page {
+	return &Page{
+		data: buf,
+	}
+}
+
 func (p *Page) PutInt32(off int64, i int32) error {
 	if off < 0 {
 		return ErrNegativeOffset

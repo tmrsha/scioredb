@@ -10,7 +10,6 @@ type FileManager struct {
 	fs        FS
 	blockSize int64
 	openFiles map[string]File
-	isClosed  bool
 	mu        sync.RWMutex
 }
 
@@ -38,9 +37,6 @@ func (m *FileManager) getFileUnsafe(filename string) (File, error) {
 func (m *FileManager) lookupFile(filename string) (File, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if m.isClosed {
-		return nil, false
-	}
 	f, ok := m.openFiles[filename]
 	return f, ok
 }
@@ -51,9 +47,6 @@ func (m *FileManager) getFile(filename string) (File, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.isClosed {
-		return nil, ErrFileManagerClosed
-	}
 	return m.getFileUnsafe(filename)
 }
 
@@ -86,9 +79,6 @@ func (m *FileManager) WriteBlock(b BlockID, p *Page) error {
 func (m *FileManager) AppendBlock(filename string) (BlockID, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.isClosed {
-		return BlockID{}, ErrFileManagerClosed
-	}
 	f, err := m.getFileUnsafe(filename)
 	if err != nil {
 		return BlockID{}, fmt.Errorf("filemanager append block: size file %s: %w", filename, err)
@@ -122,9 +112,6 @@ func (m *FileManager) BlockCount(filename string) (int64, error) {
 func (m *FileManager) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.isClosed {
-		return ErrFileManagerClosed
-	}
 	errs := make([]error, 0, len(m.openFiles))
 	for _, f := range m.openFiles {
 		err := f.Close()
@@ -133,6 +120,5 @@ func (m *FileManager) Close() error {
 		}
 	}
 	m.openFiles = nil
-	m.isClosed = true
 	return errors.Join(errs...)
 }

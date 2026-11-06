@@ -2,49 +2,34 @@ package scioredb
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
 
 type Buffer struct {
-	fm      *FileManager
-	lm      *LogManager
+	fileMgr *FileManager
+	logMgr  *LogManager
 	page    *Page
 	blk     BlockID
 	pins    int
 	txNum   int64
 	lastLSN int64
 	isDirty bool
+	mu      sync.Mutex
 }
 
-func NewBuffer(f *FileManager, l *LogManager, blockSize int64) *Buffer {
+func NewBuffer(fileMgr *FileManager, logMgr *LogManager, blockSize int64) *Buffer {
 	return &Buffer{
-		fm:      f,
-		lm:      l,
+		fileMgr: fileMgr,
+		logMgr:  logMgr,
 		page:    NewPage(blockSize),
 		blk:     BlockID{Number: -1},
 		txNum:   -1,
 		lastLSN: -1,
+		isDirty: false,
 	}
-}
-
-func (b *Buffer) flush() error {
-	if !b.isDirty {
-		return nil
-	}
-
-	if b.lastLSN >= 0 {
-		if err := b.lm.Flush(b.lastLSN); err != nil {
-			return err
-		}
-	}
-
-	if err := b.fm.WriteBlock(b.blk, b.page); err != nil {
-		return err
-	}
-
-	b.isDirty = false
-	return nil
 }
 
 func (b *Buffer) Page() *Page {
@@ -52,50 +37,100 @@ func (b *Buffer) Page() *Page {
 }
 
 func (b *Buffer) Block() BlockID {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	return b.blk
 }
 
 func (b *Buffer) TxID() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	return b.txNum
 }
 
 func (b *Buffer) IsDirty() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	return b.isDirty
 }
 
 func (b *Buffer) Pinned() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	return b.pins > 0
 }
 
 func (b *Buffer) Pin() {
+	b.mu.Lock()
 	b.pins++
+	b.mu.Unlock()
 }
 
 func (b *Buffer) Unpin() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.pins--
 	if b.pins < 0 {
 		panic("page buffer: pins count cannot be negative")
 	}
 }
 
+func (b *Buffer) Flush() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if !b.isDirty {
+		return nil
+	}
+
+	if b.lastLSN >= 0 {
+		if err := b.logMgr.Flush(b.lastLSN); err != nil {
+			return err
+		}
+	}
+
+	if err := b.fileMgr.WriteBlock(b.blk, b.page); err != nil {
+		return err
+	}
+
+	b.isDirty = false
+	return nil
+}
+
 func (b *Buffer) SetModified(txNum, lsn int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.isDirty = true
 	b.txNum = txNum
-	if lsn >= 0 {
-		b.lastLSN = lsn
-	}
+	b.lastLSN = lsn
 }
 
 func (b *Buffer) AssignToBlock(blk BlockID) error {
-	err := b.flush()
-	if err != nil {
-		return err
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.isDirty {
+		if b.lastLSN >= 0 {
+			if err := b.logMgr.Flush(b.lastLSN); err != nil {
+				return fmt.Errorf("assign to block failed during WAL flush: %w", err)
+			}
+		}
+		if err := b.fileMgr.WriteBlock(b.blk, b.page); err != nil {
+			return fmt.Errorf("assign to block failed during old block write: %w", err)
+		}
+		b.isDirty = false
 	}
+
 	b.blk = blk
-	err = b.fm.ReadBlock(blk, b.page)
-	if err != nil {
-		return err
+	b.txNum = -1
+	b.lastLSN = -1
+
+	if err := b.fileMgr.ReadBlock(blk, b.page); err != nil {
+		b.blk = BlockID{Number: -1}
+		return fmt.Errorf("critical: buffer assignment failed while reading disk block %s [#%d]: %w (buffer invalidated)",
+			blk.Filename, blk.Number, err)
 	}
+
 	return nil
 }
 
@@ -118,9 +153,9 @@ func WithTimeout(d time.Duration) BufferManagerOption {
 	}
 }
 
-func WithVictimStrategy(strategy BufferVictimStrategy) BufferManagerOption {
+func WithVictimStrategy(s BufferVictimStrategy) BufferManagerOption {
 	return func(p *BufferManager) {
-		p.victimStrategy = strategy
+		p.victimStrategy = s
 	}
 }
 
@@ -130,22 +165,24 @@ func WithSpinInterval(d time.Duration) BufferManagerOption {
 	}
 }
 
+var ErrBufferTimeout = errors.New("buffer manager timeout: no available buffers in pool")
+
 type BufferManager struct {
 	pool           []*Buffer
 	numAvailable   int
-	mu             sync.Mutex
 	victimStrategy BufferVictimStrategy
 	maxWaitTime    time.Duration
 	spinInterval   time.Duration
+	mu             sync.Mutex
 }
 
 func NewBufferManager(fm *FileManager, lm *LogManager, numBuffers int, blockSize int64, opts ...BufferManagerOption) *BufferManager {
 	m := &BufferManager{
 		pool:           make([]*Buffer, numBuffers),
 		numAvailable:   numBuffers,
-		victimStrategy: NaiveVictimStrategy,
 		maxWaitTime:    10 * time.Second,
 		spinInterval:   1 * time.Millisecond,
+		victimStrategy: NaiveVictimStrategy,
 	}
 
 	for _, opt := range opts {
@@ -167,56 +204,82 @@ func (m *BufferManager) findBuffer(blk BlockID) (*Buffer, bool) {
 	return nil, false
 }
 
-func (m *BufferManager) tryPin(blk BlockID) (*Buffer, error) {
-	pb, ok := m.findBuffer(blk)
-	if !ok {
-		pb = m.victimStrategy(m.pool)
-		if pb == nil {
-			return nil, nil
-		}
-		err := pb.AssignToBlock(blk)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if !pb.Pinned() {
-		m.numAvailable--
-	}
-	pb.Pin()
-	return pb, nil
-}
-
 func (m *BufferManager) Available() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.numAvailable
 }
 
-func (m *BufferManager) Pin(ctx context.Context, blk BlockID) (*Buffer, error) {
-	pinCtx, cancel := context.WithTimeout(ctx, m.maxWaitTime)
-	defer cancel()
-	for {
-		if m.mu.TryLock() {
-			pb, err := m.tryPin(blk)
-			if err != nil {
-				m.mu.Unlock()
-				return nil, err
-			}
-			if pb != nil {
-				m.mu.Unlock()
-				return pb, nil
-			}
+func (m *BufferManager) FlushAll() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-			if err = pinCtx.Err(); err != nil {
-				m.mu.Unlock()
-				return nil, ErrBufferTimeout
+	for _, buf := range m.pool {
+		if buf != nil && buf.IsDirty() {
+			if err := buf.Flush(); err != nil {
+				return err
 			}
-			m.mu.Unlock()
+		}
+	}
+	return nil
+}
+
+func (m *BufferManager) Pin(ctx context.Context, blk BlockID) (*Buffer, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	start := time.Now()
+
+	for {
+		if buf, found := m.findBuffer(blk); found {
+			if !buf.Pinned() {
+				m.numAvailable--
+			}
+			buf.Pin()
+			return buf, nil
 		}
 
-		select {
-		case <-pinCtx.Done():
+		buf := m.victimStrategy(m.pool)
+		if buf != nil {
+			if !buf.Pinned() {
+				m.numAvailable--
+			}
+			buf.Pin()
+
+			m.mu.Unlock()
+			err := buf.AssignToBlock(blk)
+			m.mu.Lock()
+
+			if err != nil {
+				buf.Unpin()
+				if !buf.Pinned() {
+					m.numAvailable++
+				}
+				return nil, err
+			}
+
+			return buf, nil
+		}
+
+		elapsed := time.Since(start)
+		remaining := m.maxWaitTime - elapsed
+
+		if remaining <= 0 {
 			return nil, ErrBufferTimeout
+		}
+
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		m.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			m.mu.Lock()
+			return nil, ctx.Err()
 		case <-time.After(m.spinInterval):
-			continue
+			m.mu.Lock()
 		}
 	}
 }
@@ -224,8 +287,11 @@ func (m *BufferManager) Pin(ctx context.Context, blk BlockID) (*Buffer, error) {
 func (m *BufferManager) Unpin(buf *Buffer) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	wasPinned := buf.Pinned()
 	buf.Unpin()
-	if !buf.Pinned() {
+
+	if wasPinned && !buf.Pinned() {
 		m.numAvailable++
 	}
 }
